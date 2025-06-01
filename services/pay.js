@@ -9,9 +9,9 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const email = require('../utils/mailer');
 
 exports.buyTicket = catchAsync(async (req, res, next) => {
-    const emailPlace = req.body.emailPlace;
+    const { emailPlace, email, sessionId } = req.body;
 
-    const session = await Session.findById(req.body.sessionId)
+    const session = await Session.findById(sessionId)
         .populate({
             path: 'movieId',
             select: 'title _id photoUrl'
@@ -21,26 +21,28 @@ exports.buyTicket = catchAsync(async (req, res, next) => {
             select: 'name _id'
         });
 
-    if (!session) return next(new AppError("Session don't exist", 401));
+    if (!session) return next(new AppError("Session doesn't exist", 401));
 
-    session.price = 100;
+    const discountedPrice = session.price - session.price * session.discount / 100;
+    const unitAmount = Math.round(discountedPrice * 100);
+    const totalQuantity = Object.keys(emailPlace).length;
+    const totalPrice = discountedPrice * totalQuantity;
+
     const payment = await Payment.create({
-        emailCustomer: req.body.email,
+        emailCustomer: email,
         tickets: [],
-        totalPrice: (session.price - session.price * session.discount / 100) * Object.keys(emailPlace).length
+        totalPrice
     });
 
-    for (var email of Object.keys(emailPlace)) {
+    for (const email of Object.keys(emailPlace)) {
         await Ticket.create({
             paymentId: payment._id,
             movieId: session.movieId._id,
             sessionId: session._id,
             place: emailPlace[email],
-            email: email
+            email
         });
     }
-
-    console.log(`${process.env.SERVER_URL}:${process.env.PORT}/pay/success`);
 
     const stripeSession = await stripe.checkout.sessions.create({
         success_url: `${process.env.SERVER_URL}/pay/success/{CHECKOUT_SESSION_ID}`,
@@ -51,8 +53,7 @@ exports.buyTicket = catchAsync(async (req, res, next) => {
             sessionId: session._id.toString(),
             paymentId: payment._id.toString(),
             movieId: session.movieId._id.toString(),
-            cinemaId: session.cinemaId._id.toString(),  
-            sessionId: session._id.toString()
+            cinemaId: session.cinemaId._id.toString(),
         },
         line_items: [
             {
@@ -62,14 +63,12 @@ exports.buyTicket = catchAsync(async (req, res, next) => {
                         name: 'Ticket',
                         images: [session.movieId.photoUrl],
                     },
-                    unit_amount: session.price * 100 - session.price * session.discount / 100,
+                    unit_amount: unitAmount,
                 },
-                quantity: Object.keys(emailPlace).length
+                quantity: totalQuantity
             },
         ],
     });
-
-    console.log(stripeSession.id);
 
     res.status(200).json({
         status: "success",
@@ -77,31 +76,32 @@ exports.buyTicket = catchAsync(async (req, res, next) => {
     });
 });
 
-
 exports.checkoutSuccess = catchAsync(async (req, res, next) => {
+    console.log('Checkout success called');
     const stripeSession = await stripe.checkout.sessions.retrieve(req.params.sessionId)
+
     const payment = await Payment.findById(stripeSession.metadata.paymentId);
     const movie = await Movie.findById(stripeSession.metadata.movieId);
     const cinema = await Cinema.findById(stripeSession.metadata.cinemaId);
     const tickets = await Ticket.find({ paymentId: payment._id });
     const session = await Session.findById(stripeSession.metadata.sessionId);
 
-    console.log(movie);
-    console.log(cinema);
-    console.log(session);
-
     payment.isPaid = true;
     await payment.save();
 
 
     for (var ticket of tickets) {
-        await email.sendTicketEmail({ 
-            email: ticket.email, 
-            subject: 'Ticket', 
-            message: `Your place is: place ${ticket.place} for movie <<${movie.title}>> in cinema <<${cinema.name}>> at ${session.date.getDate()}/${session.date.getMonth()}/${session.date.getFullYear()} ${session.time}` 
-        });
-    }   
-    
+        try {
+            await email.sendTicketEmail({ 
+                email: ticket.email, 
+                subject: 'Ticket', 
+                message: `Your place is: place ${ticket.place} for movie <<${movie.title}>> in cinema <<${cinema.name}>> at ${session.date.getDate()}/${session.date.getMonth()}/${session.date.getFullYear()} ${session.time}` 
+            });
+            console.log(`Email sent to ${ticket.email}`);
+        } catch (err) {
+            console.error(`Failed to send email to ${ticket.email}:`, err);
+        }
+    }
 
     res.redirect(`${process.env.CLIENT_URL}`);
 });

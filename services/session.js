@@ -29,8 +29,12 @@ exports.getAllSessions = catchAsync(async (req, res, next) => {
 
 exports.createSession = catchAsync(async (req, res, next) => {
     const createdSession = await Session.find({movieId: req.body.movieId});
-    if(createdSession) return new AppError('Session for this movie already exists', 400);
+    if (createdSession.length > 0) {
+        return next(new AppError('Session for this movie already exists', 409));
+    }
+
     const newSession = await Session.create(req.body);
+
     res.status(201).json({
         status: 'success',
         data: {
@@ -38,6 +42,7 @@ exports.createSession = catchAsync(async (req, res, next) => {
         }
     });
 });
+
 exports.deleteSession = catchAsync(async (req, res, next) => {
     const deletedSession = await Session.deleteOne({id: req.body.id});
     res.status(201).json({
